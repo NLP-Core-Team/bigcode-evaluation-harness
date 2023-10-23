@@ -13,6 +13,7 @@ import re
 from evaluate import load
 
 from lm_eval.base import Task
+from pprint import pprint
 
 _CITATION = """
 @misc{chen2021evaluating,
@@ -36,7 +37,7 @@ class HumanEval(Task):
     def __init__(self):
         
         super().__init__(
-            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```"],
+            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"],
             requires_execution=True,
         )
 

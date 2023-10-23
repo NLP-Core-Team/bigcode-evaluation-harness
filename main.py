@@ -6,11 +6,14 @@ import datasets
 import torch
 import transformers
 from accelerate import Accelerator
-from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, HfArgumentParser
+from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, HfArgumentParser, CodeLlamaTokenizer
 
 from lm_eval.arguments import EvalArguments
 from lm_eval.evaluator import Evaluator
 from lm_eval.tasks import ALL_TASKS
+
+
+print(f"{transformers.__version__=}, {torch.__version__=}")
 
 
 class MultiChoice:
@@ -272,15 +275,25 @@ def main():
             print("Loaded PEFT model. Merging...")
             model.merge_and_unload()
             print("Merge complete.")
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model,
-            revision=args.revision,
-            trust_remote_code=args.trust_remote_code,
-            use_auth_token=args.use_auth_token,
-            truncation_side="left",
-            padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
-        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model,
+                revision=args.revision,
+                trust_remote_code=args.trust_remote_code,
+                use_auth_token=args.use_auth_token,
+                truncation_side="left",
+                padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
+            )
+        except Exception:
+            print("Error loading AutoTokenizer, trying CodeLlamaTokenizer")
+            tokenizer = CodeLlamaTokenizer.from_pretrained(
+                args.model,
+                revision=args.revision,
+                trust_remote_code=args.trust_remote_code,
+                use_auth_token=args.use_auth_token,
+                truncation_side="left",
+                padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
+            )
         if not tokenizer.eos_token:
             if tokenizer.bos_token:
                 tokenizer.eos_token = tokenizer.bos_token

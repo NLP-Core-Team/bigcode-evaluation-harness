@@ -24,7 +24,7 @@ class HumanEvalRu(Task):
 
     def get_dataset(self):
         """Returns dataset for the task or an iterable of any object, that get_prompt can handle"""
-        return self.dataset["test"]
+        return self.dataset["train"]
 
     def get_prompt(self, doc):
         """Builds the prompt for the LM to generate from."""
@@ -59,7 +59,7 @@ class HumanEvalRu(Task):
             index of doc in the dataset to which the generation belongs
             (not used for Humaneval-Task)
         """
-        prompt = self.get_prompt(self.dataset["test"][idx])
+        prompt = self.get_prompt(self.dataset["train"][idx])
         generation = generation[len(prompt) :]
         return prompt + self._stop_at_stop_token(generation, self.stop_words)
 

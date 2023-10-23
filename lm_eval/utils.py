@@ -5,6 +5,7 @@ from collections import defaultdict
 import torch
 from torch.utils.data import IterableDataset
 from tqdm import tqdm
+from pprint import pprint
 
 INFILL_MODE = False
 INSTRUCTION_MODE = False
@@ -51,6 +52,8 @@ class TokenizedDataset(IterableDataset):
         instruction = []
         for sample in range(self.limit_start, self.limit_start+self.n_tasks):
             prompt_contents = self.task.get_prompt(self.dataset[sample])
+            if sample % 10 == 0:
+                print(prompt_contents)
             if isinstance(prompt_contents, str):
                 # Normal code completion mode
                 infill.append(False)
@@ -98,6 +101,7 @@ class TokenizedDataset(IterableDataset):
             padding=True,
             truncation=True,
             return_tensors="pt",
+            add_special_tokens=False,
             max_length=self.max_length,
             return_token_type_ids=return_token_type_ids,
         )
@@ -120,7 +124,7 @@ class TokenizedDataset(IterableDataset):
             )
 
         for sample in range(self.n_tasks):
-            for _ in range(self.n_copies):
+            for i in range(self.n_copies):
                 if self.has_encoder:
                     yield {
                         "ids": outputs.input_ids[sample],
@@ -130,6 +134,9 @@ class TokenizedDataset(IterableDataset):
                         "input_len_encoder": outputs_encoder.attention_mask[sample].sum(),
                     }
                 else:
+                    if i == 0 and sample == 0:
+                        pprint(self.prefix, )
+                        print(outputs.input_ids[sample])
                     yield {
                         "ids": outputs.input_ids[sample],
                         "task_id": sample,
@@ -258,6 +265,8 @@ def complete_code(
                 gen_kwargs["stopping_criteria"][idx].input_length = batch["input_len"].max().item()                
             
             inputs = batch["ids"][:, : batch["input_len"]]
+            if step == 0:
+                print(inputs)
             if "ids_encoder" in batch:
                 if is_wrapped:
                     generated_tokens = accelerator.unwrap_model(model).generate(
