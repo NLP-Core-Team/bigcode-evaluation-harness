@@ -3,6 +3,7 @@ import re
 from evaluate import load
 
 from lm_eval.base import Task
+from lm_eval.utils import extract_generation_code
 
 _CITATION = """
 """
@@ -15,10 +16,17 @@ class HumanEvalRu(Task):
 
     DATASET_PATH = "NLPCoreTeam/humaneval_ru"
 
-    def __init__(self):
+    def __init__(self, prompt=""):
         self.counter = 0
+        self.prompt = prompt
+        if self.prompt == "instruct_mistral":
+            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>"]
+        elif self.prompt == "instruct_deepseek":
+            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>","<|EOT|>"]
+        else:
+            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"]
         super().__init__(
-            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif"],
+            stop_words=stop_words,
             requires_execution=True,
         )
 
@@ -28,7 +36,21 @@ class HumanEvalRu(Task):
 
     def get_prompt(self, doc):
         """Builds the prompt for the LM to generate from."""
-        return doc["prompt"].strip()
+        if self.prompt == "mistral":
+            prompt = f"[INST] {doc['prompt'].strip()} [/INST]"
+        elif self.prompt == "markdown":
+            prompt = f"```python\n{doc['prompt'].strip()}"
+        elif self.prompt == "github":
+            prompt = f"<|code|>\n{doc['prompt'].strip()}"
+        elif self.prompt == "instruct_mistral":
+            prompt = f"[INST] Пожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
+        elif self.prompt == "instruct_deepseek":
+            prompt = f"[INST] Пожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
+        elif self.prompt == "instruct_deepseek":
+            prompt = f"<｜begin▁of▁sentence｜>You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer\n### Instruction:\nПожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n```### Response:\n"
+        else:
+            prompt = doc["prompt"].strip()
+        return prompt
 
     def get_reference(self, doc):
         """Builds the reference solution for the doc (sample from the test dataset)."""
@@ -59,9 +81,11 @@ class HumanEvalRu(Task):
             index of doc in the dataset to which the generation belongs
             (not used for Humaneval-Task)
         """
-        prompt = self.get_prompt(self.dataset["train"][idx])
-        generation = generation[len(prompt) :]
-        return prompt + self._stop_at_stop_token(generation, self.stop_words)
+        prompt = self.get_dataset()[idx]["prompt"].strip()
+        if self.prompt == 'instruct_mistral':
+            return extract_generation_code(task_id=idx, output=generation, prompt=prompt,lang_code='python')
+        else:
+            return prompt + self._stop_at_stop_token(generation, self.stop_words)
 
     def process_results(self, generations, references):
         """Takes the list of LM generations and evaluates them against ground truth references,

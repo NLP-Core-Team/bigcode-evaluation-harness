@@ -1,20 +1,33 @@
-import fnmatch
-import json
-import warnings
-
-import datasets
-import torch
-import transformers
-from accelerate import Accelerator
+from lm_eval import tasks
+from lm_eval.utils import TokenizedDataset
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, HfArgumentParser, CodeLlamaTokenizer
-
+from torch.utils.data.dataloader import DataLoader
+import torch
 from lm_eval.arguments import EvalArguments
 from lm_eval.evaluator import Evaluator
 from lm_eval.tasks import ALL_TASKS
+import fnmatch
+import datasets
+import transformers
+from functools import partial
+import multiprocessing
+import torch.multiprocessing as mp
+import json
+import os
+import random
+import numpy as np
+import random
+from pathlib import Path
 
-
-print(f"{transformers.__version__=}, {torch.__version__=}")
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_ALLOW_CODE_EVAL"] = "1"
+def seed_everything(seed=42):
+  random.seed(seed)
+  os.environ['PYTHONHASHSEED'] = str(seed)
+  np.random.seed(seed)
+  torch.manual_seed(seed)
+  torch.backends.cudnn.deterministic = True
+  torch.backends.cudnn.benchmark = False
 
 class MultiChoice:
     def __init__(self, choices):
@@ -37,7 +50,7 @@ def parse_args():
     parser = HfArgumentParser(EvalArguments)
 
     parser.add_argument(
-        "--model",
+        "--model_path",
         default="codeparrot/codeparrot-small",
         help="Model to evaluate, provide a repo name in Hugging Face hub or a local path",
     )
@@ -93,7 +106,7 @@ def parse_args():
     parser.add_argument(
         "--precision",
         type=str,
-        default="fp32",
+        default="bf16",
         help="Model precision, from: fp32, fp16 or bf16",
     )
     parser.add_argument(
@@ -178,7 +191,9 @@ def parse_args():
         "--check_references",
         action="store_true",
         help="Don't run generation but benchmark groundtruth (useful for debugging)",
-    )    
+    )
+    parser.add_argument('-d', '--devices', type=str, default='0')
+    parser.add_argument('--instance_per_device', type=int, default='1')
     return parser.parse_args()
 
 
@@ -196,144 +211,158 @@ def get_gpus_max_memory(max_memory, num_gpus):
     print("Loading model via these GPUs & max memories: ", max_memory)
     return max_memory
 
+def get_dataset_list(dataset, devices, instance_per_device):
+    random.shuffle(dataset)
+    num_process = devices * instance_per_device
+    size = len(dataset)//num_process
+    reminder = len(dataset)%num_process
+    dataset_lists = list()
+    for i in range(num_process):
+        dataset_lists.append(
+            dataset[i*size:(i+1)*size]
+        )
+    dataset_reminder = len(dataset) - size * num_process
+    dataset_reminder = len(dataset) - dataset_reminder
+    for i in range(reminder):
+        dataset_lists[i].append(
+            dataset[dataset_reminder+i]
+        )
+    return dataset_lists
+
+def run_job(dataset, task, gpu_device, args, return_dict):
+    tokenizer = AutoTokenizer.from_pretrained(
+                    args.model_path,
+                    use_fast=False,
+                    truncation_side="left",
+                    padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
+                )
+    if not tokenizer.eos_token:
+        if tokenizer.bos_token:
+            tokenizer.eos_token = tokenizer.bos_token
+            print("bos_token used as eos_token")
+        else:
+            raise ValueError("No eos_token or bos_token found")
+    try:
+        tokenizer.pad_token = tokenizer.eos_token
+    # Some models like CodeGeeX2 have pad_token as a read-only property
+    except AttributeError:
+        print("Not setting pad_token to eos_token")
+        pass
+    # tokenizer.eos_token = tokenizer.bos_token
+    model = AutoModelForCausalLM.from_pretrained(
+                    args.model_path,
+                    torch_dtype=torch.bfloat16,
+                    use_flash_attention_2=True,
+                )
+    model.to(torch.device(gpu_device))
+    evaluator = Evaluator(model, tokenizer, args)
+    generations, references = evaluator.generate_text(task, dataset)
+    process_name = multiprocessing.current_process().name
+    return_dict[process_name] = {
+        'generations': generations,
+        'references': references,
+    }
+
 def main():
     args = parse_args()
+    seed_everything(seed=args.seed)
+
+    if Path(args.metric_output_path).exists():
+        print('Metrics already calculated')
+        with open(args.metric_output_path) as f:
+            print(f.read())
+        exit()
+
+    if not Path(args.model_path).exists():
+        print('Model path is incorrect')
+        exit()
+
     transformers.logging.set_verbosity_error()
     datasets.logging.set_verbosity_error()
 
+    
     if args.tasks is None:
         task_names = ALL_TASKS
     else:
         task_names = pattern_match(args.tasks.split(","), ALL_TASKS)
-
-    accelerator = Accelerator()
-    if accelerator.is_main_process:
-        print(f"Selected Tasks: {task_names}")
-
     results = {}
-    if args.load_generations_path:
-        # here we don't generate code but only evaluate previously computed generations
-        if accelerator.is_main_process:
-            print("evaluation only mode")
-        evaluator = Evaluator(accelerator, None, None, args)
-        for task in task_names:
-            results[task] = evaluator.evaluate(task)
-    else:
-        # here we generate code and save it (evaluation is optional but True by default)
-        dict_precisions = {
-            "fp32": torch.float32,
-            "fp16": torch.float16,
-            "bf16": torch.bfloat16,
+
+    #model_path = '/home/jovyan/chernysh/instruct/output/instruct_v0.4/checkpoint-339'
+    
+    for task_name in task_names:
+        task = tasks.get_task(task_name, args)
+        dataset = task.get_dataset()
+        dataset_list = list(dataset)
+        for i, item in enumerate(dataset_list):
+            item['idx'] = i
+
+        devices = [f'cuda:{idx}' for idx in args.devices.split(',')]
+
+        datasets_list = get_dataset_list(dataset_list, len(devices), args.instance_per_device)
+        manager = multiprocessing.Manager()
+        return_dict = manager.dict()
+        processes = list()
+        for device_idx, device in enumerate(devices):
+            for i in range(args.instance_per_device):
+                idx = i+device_idx*args.instance_per_device
+                partial_dataset = datasets_list[idx]
+                torch.cuda.empty_cache()
+                func = partial(
+                    run_job,
+                    dataset=partial_dataset,
+                    task=task,
+                    gpu_device=device,
+                    args=args,
+                    return_dict=return_dict,
+                )
+
+                processes.append(
+                    mp.Process(
+                        name=f'{idx}', 
+                        target=func,
+                        daemon=True
+                    )
+                )
+
+        for p in processes:
+            p.start()
+
+        for p in processes:
+            p.join()
+
+        gen_results = {
+            'generations': [],
+            'references': [],
         }
-        if args.precision not in dict_precisions:
-            raise ValueError(
-                f"Non valid precision {args.precision}, choose from: fp16, fp32, bf16"
-            )
+        for key in list(gen_results.keys()):
+            for i in list(return_dict.values()):
+                gen_results[key] += i[key]
 
-        model_kwargs = {
-            "revision": args.revision,
-            "trust_remote_code": args.trust_remote_code,
-            "use_auth_token": args.use_auth_token,
-        }
-        if args.load_in_8bit:
-            print("Loading model in 8bit")
-            model_kwargs["load_in_8bit"] = args.load_in_8bit
-            model_kwargs["device_map"] = {"": accelerator.process_index}
-        elif args.load_in_4bit:
-            print("Loading model in 4bit")
-            model_kwargs["load_in_4bit"] = args.load_in_4bit
-            model_kwargs["device_map"] = {"": accelerator.process_index}
-        else:
-            print(f"Loading model in {args.precision}")
-            model_kwargs["torch_dtype"] = dict_precisions[args.precision]
+        if args.save_generations:
+            Path(args.save_generations_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.save_generations_path, "w", encoding='utf8') as fp:
+                json.dump(gen_results['generations'], fp)
+                print(
+                    f"generations were saved at {args.save_generations_path}"
+                )
+        if args.save_references:
+            with open("references.json", "w", encoding='utf8') as fp:
+                json.dump(gen_results['references'], fp)
+                print("references were saved at references.json")
 
-            if args.max_memory_per_gpu:
-                model_kwargs["max_memory"] = get_gpus_max_memory(args.max_memory_per_gpu, accelerator.num_processes)
-                model_kwargs["offload_folder"] = "offload"
-                model_kwargs["device_map"] = "auto"
+        if not args.generation_only:
+            print("Evaluating generations...")
+            results = {}
+            results[task_name] = task.process_results(gen_results['generations'], gen_results['references'])
+            results["config"] = vars(args)
 
-        
-        if args.modeltype == "causal":
-            model = AutoModelForCausalLM.from_pretrained(
-                args.model,
-                **model_kwargs,
-            )
-        elif args.modeltype == "seq2seq":
-            warnings.warn("Seq2Seq models have only been tested for HumanEvalPack & CodeT5+ models.")
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                args.model,
-                **model_kwargs,
-            )
-        else:
-            raise ValueError(
-                f"Non valid modeltype {args.modeltype}, choose from: causal, seq2seq"
-            )
-
-        if args.peft_model:
-            from peft import PeftModel  # dynamic import to avoid dependency on peft
-            model = PeftModel.from_pretrained(model, args.peft_model)
-            print("Loaded PEFT model. Merging...")
-            model.merge_and_unload()
-            print("Merge complete.")
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.model,
-                revision=args.revision,
-                trust_remote_code=args.trust_remote_code,
-                use_auth_token=args.use_auth_token,
-                truncation_side="left",
-                padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
-            )
-        except Exception:
-            print("Error loading AutoTokenizer, trying CodeLlamaTokenizer")
-            tokenizer = CodeLlamaTokenizer.from_pretrained(
-                args.model,
-                revision=args.revision,
-                trust_remote_code=args.trust_remote_code,
-                use_auth_token=args.use_auth_token,
-                truncation_side="left",
-                padding_side="right", # padding on the right is needed to cut off padding in `complete_code`
-            )
-        if not tokenizer.eos_token:
-            if tokenizer.bos_token:
-                tokenizer.eos_token = tokenizer.bos_token
-                print("bos_token used as eos_token")
-            else:
-                raise ValueError("No eos_token or bos_token found")
-        try:
-            tokenizer.pad_token = tokenizer.eos_token
-        # Some models like CodeGeeX2 have pad_token as a read-only property
-        except AttributeError:
-            print("Not setting pad_token to eos_token")
-            pass
-        evaluator = Evaluator(accelerator, model, tokenizer, args)
-
-        for task in task_names:
-            if args.generation_only:
-                if accelerator.is_main_process:
-                    print("generation mode only")
-                generations, references = evaluator.generate_text(task)
-                if accelerator.is_main_process:
-                    with open(args.save_generations_path, "w") as fp:
-                        json.dump(generations, fp)
-                        print(f"generations were saved at {args.save_generations_path}")
-                    if args.save_references:
-                        with open("references.json", "w") as fp:
-                            json.dump(references, fp)
-                            print("references were saved")
-            else:
-                results[task] = evaluator.evaluate(task)
-
-    # Save all args to config
-    results["config"] = vars(args)
-    if not args.generation_only:
-        dumped = json.dumps(results, indent=2)
-        if accelerator.is_main_process:
+            dumped = json.dumps(results, indent=2)
             print(dumped)
+            Path(args.metric_output_path).parent.mkdir(parents=True, exist_ok=True)
 
-        with open(args.metric_output_path, "w") as f:
-            f.write(dumped)
+            with open(args.metric_output_path, "w", encoding='utf8') as f:
+                f.write(dumped)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+

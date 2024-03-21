@@ -1,3 +1,4 @@
+import re
 import math
 import warnings
 from collections import defaultdict
@@ -52,8 +53,6 @@ class TokenizedDataset(IterableDataset):
         instruction = []
         for sample in range(self.limit_start, self.limit_start+self.n_tasks):
             prompt_contents = self.task.get_prompt(self.dataset[sample])
-            if sample % 10 == 0:
-                print(prompt_contents)
             if isinstance(prompt_contents, str):
                 # Normal code completion mode
                 infill.append(False)
@@ -123,23 +122,23 @@ class TokenizedDataset(IterableDataset):
                 "n_copies (n_samples/batch_size) was changed from 1 to 2 because n_tasks isn't proportional to num devices"
             )
 
-        for sample in range(self.n_tasks):
+        for sample, item in enumerate(self.dataset):
             for i in range(self.n_copies):
                 if self.has_encoder:
                     yield {
                         "ids": outputs.input_ids[sample],
                         "ids_encoder": outputs_encoder.input_ids[sample],
-                        "task_id": sample,
+                        "task_id": item['idx'],
                         "input_len": outputs.attention_mask[sample].sum(),
                         "input_len_encoder": outputs_encoder.attention_mask[sample].sum(),
                     }
                 else:
-                    if i == 0 and sample == 0:
-                        pprint(self.prefix, )
-                        print(outputs.input_ids[sample])
+                    # if i == 0 and sample == 0:
+                    #     pprint(self.prefix, )
+                    #     print(outputs.input_ids[sample])
                     yield {
                         "ids": outputs.input_ids[sample],
-                        "task_id": sample,
+                        "task_id": item['idx'],
                         "input_len": outputs.attention_mask[sample].sum(),
                     }
 
@@ -227,7 +226,6 @@ def _parse_instruction(code, instruction_tokens):
 
 def complete_code(
     task,
-    accelerator,
     model,
     tokenizer,
     dataloader,
@@ -250,7 +248,7 @@ def complete_code(
     for step, batch in tqdm(
         enumerate(dataloader),
         total=math.ceil(
-            n_tasks * dataloader.dataset.n_copies / accelerator.num_processes
+            n_tasks * dataloader.dataset.n_copies
         ),
     ):
         with torch.no_grad():
@@ -266,57 +264,36 @@ def complete_code(
             
             inputs = batch["ids"][:, : batch["input_len"]]
             if step == 0:
-                print(inputs)
+                pass
             if "ids_encoder" in batch:
-                if is_wrapped:
-                    generated_tokens = accelerator.unwrap_model(model).generate(
-                        decoder_input_ids=inputs,
-                        input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
-                        num_return_sequences=batch_size,
-                        decoder_start_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        **gen_kwargs,
-                    )
-                else:
-                    generated_tokens = model.generate(
-                        decoder_input_ids=inputs,
-                        input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
-                        num_return_sequences=batch_size,
-                        decoder_start_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        **gen_kwargs,
-                    )
+                generated_tokens = model.generate(
+                    decoder_input_ids=inputs,
+                    input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
+                    num_return_sequences=batch_size,
+                    decoder_start_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    **gen_kwargs,
+                )
             else:
-                if is_wrapped:
-                    # 8bit and 4bit models are wrapped in accelerator
-                    generated_tokens = accelerator.unwrap_model(model).generate(
-                        input_ids=inputs,
-                        num_return_sequences=batch_size,
-                        **gen_kwargs,
-                    )
-                else:
-                    generated_tokens = model.generate(
-                        input_ids=inputs,
-                        num_return_sequences=batch_size,
-                        **gen_kwargs,
-                    )
+                device = model.device
+                inputs = inputs.to(device)
+                generated_tokens = model.generate(
+                    input_ids=inputs,
+                    num_return_sequences=batch_size,
+                    **gen_kwargs,
+                )
             # each task is generated batch_size times
             generated_tasks = batch["task_id"].repeat(batch_size)
-            generated_tokens = accelerator.pad_across_processes(
-                generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
-            )
-
-            generated_tokens, generated_tasks = accelerator.gather(
-                (generated_tokens, generated_tasks)
-            )
             generated_tokens = generated_tokens.cpu().numpy()
+            generated_tokens = [tokens[len(inputs[0]):] for tokens in generated_tokens]
             generated_tasks = generated_tasks.cpu().numpy()
 
             for sample, generated_tokens in zip(generated_tasks, generated_tokens):
                 gen_token_dict[sample].append(generated_tokens)
 
     code_gens = [[] for _ in range(n_tasks)]
-    for sample, generated_tokens in gen_token_dict.items():
+    for sample, item in enumerate(gen_token_dict.items()):
+        idx, generated_tokens = item
         for s in generated_tokens:
             if INFILL_MODE or tokenizer.eos_token in task.stop_words:
                 if s[0] == tokenizer.bos_token_id:
@@ -336,11 +313,11 @@ def complete_code(
                 gen_code = tokenizer.decode(
                     s, skip_special_tokens=True, clean_up_tokenization_spaces=True
                 )
-            if not INFILL_MODE:
-                gen_code = gen_code[len(prefix) :]
+            # if not INFILL_MODE:
+            #     gen_code = gen_code[len(prefix) :]
             if postprocess:
                 code_gens[sample].append(
-                    task.postprocess_generation(gen_code, int(sample) + limit_start)
+                    task.postprocess_generation(gen_code, int(idx) + limit_start)
                 )
             else:
                 warnings.warn(
@@ -373,3 +350,150 @@ def remove_after_return(code):
             return code[0:start_match]
         end_last_match = end_match
     return code
+
+
+languge_settings = {
+    'python': {
+        'full_name': 'Python',
+        'indent': 4,
+    },
+    'python_ru': {
+        'full_name': 'Python',
+        'indent': 4,
+    },
+    'cpp': {
+        'full_name': 'cpp',
+        'indent': 0,
+        'main': "int main()",
+    },
+    'java': {
+        'full_name': 'Java',
+        'indent': 4,
+        'main': "public static void main",
+    },
+    'cs': {
+        'full_name': "csharp",
+        'indent': 0,
+        'main': "public static void Main",
+    },
+    'php': {
+        'full_name': "PHP",
+        'indent': 0,
+    },
+    'ts': {
+        'full_name': "TypeScript",
+        'indent': 0,
+    },
+    'js': {
+        'full_name': "JavaScript",
+        'indent': 0
+    },
+    'sh': {
+        'full_name': "Bash",
+        'indent': 0
+    }
+}
+
+def get_function_name(question: str, lang: str):
+    func_lines = [x for x in question.strip().split('\n') if x.strip()]
+
+    if lang.lower() == 'python':
+        func_idx = [i for i in range(len(func_lines)) if func_lines[i].startswith("def ")][-1]
+        func_name = func_lines[func_idx].split('(')[0].strip()
+        func_prefix = "\n".join(func_lines[:func_idx])
+        return func_name, func_prefix
+    
+    func_name = func_lines[-1].split('{')[0].strip()
+    func_prefix = "\n".join(func_lines[:-1])
+    return func_name, func_prefix
+
+def extract_generation_code(task_id: str, output: str, prompt: str, lang_code: str, verbose: bool=False):
+    question = prompt.strip()
+    setting = languge_settings[lang_code]
+    lang = setting['full_name']
+    indent = setting['indent']
+
+    try:
+        code_block: str = re.findall(f'```{lang.lower()}\n(.*?)```', output, re.DOTALL | re.IGNORECASE)[0]
+        if verbose:
+            print(">>> Task: {}\n{}".format(task_id, code_block))
+        
+        # Remove main
+        if setting.get('main', None) and setting['main'] in code_block:
+            main_start = code_block.index(setting['main'])
+            code_block = code_block[:main_start]
+        
+        func_name, func_prefix = get_function_name(question, lang)
+
+        try:
+            start = code_block.lower().index(func_name.lower())
+            indent = 0
+            while start - indent >= 0 and code_block[start - indent-1] == ' ':
+                indent += 1
+            
+            try:
+                end = code_block.rindex('\n' + ' '*indent + '}')
+            except:
+                end = len(code_block)
+        except:
+            start = 0
+            try:
+                end = code_block.rindex('\n' + ' '*indent + '}')
+            except:
+                end = len(code_block)
+
+        body = code_block[start:end]
+
+        if lang_code.lower() in ['php', 'ts', 'js']:
+            body += '\n' + ' '*indent + '}'
+    
+        generation = func_prefix + '\n' + body + '\n'
+
+    except Exception as ex:
+        print("Failed to extract code block with error `{}`:\n>>> Task: {}\n>>> Output:\n{}".format(
+            ex, task_id, output
+        ))
+        generation = prompt + '\n' + output
+    
+    return generation
+
+def cleanup_code(
+    code: str,
+    language_type: str = None,
+    dataset: str = None,
+    issft: bool = False,
+    stop_words = []
+):
+    """
+    Cleans up the generated code.
+    """
+
+    if language_type.lower() == "python":
+        if issft:
+            code = _clean_python_code_for_sft(code)
+        stop_words = ["\ndef", "\nclass", "\nif", "\n#", "\nprint"]
+        code = _truncate_code_at_stopwords(code, stop_words)
+    elif language_type.lower() == "ts":
+        code = _truncate_code_at_stopwords(code, stop_words + ["\nexport", "\nimport", "\nexport default", "\nimport default", "\nconsole.log"])
+    else:
+        code = _truncate_code_at_stopwords(code, stop_words)
+
+    return code
+
+def _clean_python_code_for_sft(code):
+    code = code.replace("\r", "")
+    if "```python" in code:
+        code_start_idx = code.index("```python")
+        code = code[code_start_idx:].replace("```python", "").strip()
+        end_idx = code.find("```") if "```" in code else len(code)
+        code = code[:end_idx].strip()
+
+    return code
+
+def _truncate_code_at_stopwords(code, stop_words):
+    min_stop_idx = len(code)
+    for stop_word in stop_words:
+        stop_index = code.find(stop_word)
+        if 0 <= stop_index < min_stop_idx:
+            min_stop_idx = stop_index
+    return code[:min_stop_idx]

@@ -20,6 +20,9 @@ class EvalArguments:
     temperature: Optional[float] = field(
         default=0.2, metadata={"help": "Sampling temperature used for generation."}
     )
+    repetition_penalty: Optional[float] = field(
+        default=1, metadata={"help": "Repetition penalty used for generation."}
+    )
     top_k: Optional[int] = field(
         default=0, metadata={"help": "Top-k parameter used for generation."}
     )

@@ -13,6 +13,7 @@ import re
 from evaluate import load
 
 from lm_eval.base import Task
+from lm_eval.utils import extract_generation_code
 from pprint import pprint
 
 _CITATION = """
@@ -34,12 +35,19 @@ class HumanEval(Task):
 
     DATASET_PATH = "openai_humaneval"
 
-    def __init__(self):
-        
+    def __init__(self, prompt=""):
+        self.prompt = prompt
+        if self.prompt == "instruct_mistral":
+            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>"]
+        elif self.prompt == "instruct_deepseek":
+            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>","<|EOT|>"]
+        else:
+            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"]
         super().__init__(
-            stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"],
+            stop_words=stop_words,
             requires_execution=True,
         )
+        
 
     def get_dataset(self):
         """Returns dataset for the task or an iterable of any object, that get_prompt can handle"""
@@ -47,7 +55,19 @@ class HumanEval(Task):
 
     def get_prompt(self, doc):
         """Builds the prompt for the LM to generate from."""
-        return doc["prompt"].strip()
+        if self.prompt == "mistral":
+            prompt = f"[INST] {doc['prompt'].strip()} [/INST]"
+        elif self.prompt == "markdown":
+            prompt = f"```python\n{doc['prompt'].strip()}"
+        elif self.prompt == "github":
+            prompt = f"<|code|>\n{doc['prompt'].strip()}"
+        elif self.prompt == "instruct_mistral":
+            prompt = f"[INST] Please continue to complete the function. You are not allowed to modify the given code and do the completion only. Please return all completed function in a codeblock. Here is the given code to do completion:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
+        elif self.prompt == "instruct_deepseek":
+            prompt = f"<｜begin▁of▁sentence｜>You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer\n### Instruction:\nPlease continue to complete the function. You are not allowed to modify the given code and do the completion only. Please return all completed function in a codeblock. Here is the given code to do completion:\n```python\n{doc['prompt'].strip()}\n```\n### Response:\n"   
+        else:
+            prompt = doc["prompt"].strip()
+        return prompt
 
     def get_reference(self, doc):
         """Builds the reference solution for the doc (sample from the test dataset)."""
@@ -78,9 +98,11 @@ class HumanEval(Task):
             index of doc in the dataset to which the generation belongs
             (not used for Humaneval-Task)
         """
-        prompt = self.get_prompt(self.dataset["test"][idx])
-        generation = generation[len(prompt) :]
-        return prompt + self._stop_at_stop_token(generation, self.stop_words)
+        prompt = self.get_dataset()[idx]["prompt"].strip()
+        if self.prompt == 'instruct_mistral':
+            return extract_generation_code(task_id=idx, output=generation, prompt=prompt,lang_code='python')
+        else:
+            return prompt + self._stop_at_stop_token(generation, self.stop_words)
 
     def process_results(self, generations, references):
         """Takes the list of LM generations and evaluates them against ground truth references,
@@ -94,5 +116,6 @@ class HumanEval(Task):
         results, _ = code_metric.compute(
             references=references,
             predictions=generations,
+            num_workers=20,
         )
         return results

@@ -26,8 +26,7 @@ Once you have read this disclaimer and taken appropriate precautions, set the ar
 
 
 class Evaluator:
-    def __init__(self, accelerator, model, tokenizer, args):
-        self.accelerator = accelerator
+    def __init__(self, model, tokenizer, args):
         self.model = model
         self.tokenizer = tokenizer
         self.args = args
@@ -38,9 +37,9 @@ class Evaluator:
         # code evaluation permission
         self.allow_code_execution = args.allow_code_execution
 
-    def generate_text(self, task_name):
-        task = tasks.get_task(task_name, self.args)
-        dataset = task.get_dataset()
+    def generate_text(self, task, dataset):
+        # task = tasks.get_task(task_name)
+        # dataset = task.get_dataset()
         # if args.limit is None, use all samples
         n_tasks = self.args.limit if self.args.limit else len(dataset)
         references = [task.get_reference(dataset[i]) for i in range(self.args.limit_start, self.args.limit_start+n_tasks)]
@@ -55,7 +54,6 @@ class Evaluator:
         generations = parallel_generations(
             task,
             dataset,
-            self.accelerator,
             self.model,
             self.tokenizer,
             n_tasks=n_tasks,
@@ -68,25 +66,24 @@ class Evaluator:
             )
         return generations, references
 
-    def evaluate(self, task_name):
-        task = tasks.get_task(task_name, self.args)
+    def evaluate(self, task, dataset):
+        # task = tasks.get_task(task_name, self.args)
         if task.requires_execution and not self.allow_code_execution:
             raise ValueError(_WARNING)
 
-        generations, references = self.generate_text(task_name)
+        generations, references = self.generate_text(task, dataset)
 
-        if self.accelerator.is_main_process:
-            if not self.args.load_generations_path:
-                if self.args.save_generations:
-                    with open(self.args.save_generations_path, "w") as fp:
-                        json.dump(generations, fp)
-                        print(
-                            f"generations were saved at {self.args.save_generations_path}"
-                        )
-                if self.args.save_references:
-                    with open("references.json", "w") as fp:
-                        json.dump(references, fp)
-                        print("references were saved at references.json")
+        if not self.args.load_generations_path:
+            if self.args.save_generations:
+                with open(self.args.save_generations_path, "w") as fp:
+                    json.dump(generations, fp)
+                    print(
+                        f"generations were saved at {self.args.save_generations_path}"
+                    )
+            if self.args.save_references:
+                with open("references.json", "w") as fp:
+                    json.dump(references, fp)
+                    print("references were saved at references.json")
 
             # make sure tokenizer plays nice with multiprocessing
             os.environ["TOKENIZERS_PARALLELISM"] = "false"

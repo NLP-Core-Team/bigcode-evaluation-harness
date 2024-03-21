@@ -1,7 +1,6 @@
 import json
 from math import ceil
 
-from accelerate.utils import set_seed
 from torch.utils.data.dataloader import DataLoader
 from transformers import StoppingCriteria, StoppingCriteriaList
 
@@ -37,18 +36,16 @@ class TooLongFunctionCriteria(StoppingCriteria):
         return input_ids.shape[1] > int(self.input_length * self.multiplier)
         
 
-def parallel_generations(task, dataset, accelerator, model, tokenizer, n_tasks, args):
+def parallel_generations(task, dataset, model, tokenizer, n_tasks, args):
     if args.load_generations_path:
         # load generated code
         with open(args.load_generations_path) as fp:
             generations = json.load(fp)
-            if accelerator.is_main_process:
-                print(
-                    f"generations loaded, {n_tasks} selected from {len(generations)} with {len(generations[0])} candidates"
-                )
+            print(
+                f"generations loaded, {n_tasks} selected from {len(generations)} with {len(generations[0])} candidates"
+            )
         return generations[:n_tasks]
 
-    set_seed(args.seed, device_specific=True)
 
     # Setup generation settings
     gen_kwargs = {
@@ -57,7 +54,9 @@ def parallel_generations(task, dataset, accelerator, model, tokenizer, n_tasks, 
         "top_p": args.top_p,
         "top_k": args.top_k,
         "max_length": args.max_length_generation,
+        "repetition_penalty": args.repetition_penalty,
     }
+
     stopping_criteria = []
     # The input_length / start_length set to 0 for now will be adjusted later
     # Check if the task has a custom check_fn method for the stopping criteria
@@ -90,15 +89,14 @@ def parallel_generations(task, dataset, accelerator, model, tokenizer, n_tasks, 
                 task.stop_words.append(token)
     else:
         instruction_tokens = None
-    if accelerator.is_main_process:
-        print(f"number of problems for this task is {n_tasks}")
+    # print(f"number of problems for this task is {n_tasks}")
     n_copies = ceil(args.n_samples / args.batch_size)
 
     ds_tokenized = TokenizedDataset(
         task,
         dataset,
         tokenizer,
-        num_devices=accelerator.state.num_processes,
+        num_devices=8,
         max_length=args.max_length_generation,
         limit_start=args.limit_start,
         n_tasks=n_tasks,
@@ -107,26 +105,13 @@ def parallel_generations(task, dataset, accelerator, model, tokenizer, n_tasks, 
         has_encoder=args.modeltype == "seq2seq",
         instruction_tokens=instruction_tokens,
     )
-
     # do not confuse args.batch_size, which is actually the num_return_sequences
     ds_loader = DataLoader(ds_tokenized, batch_size=1)
 
     is_loaded_in_8bit = getattr(model, "is_loaded_in_8bit", False)
     is_loaded_in_4bit = getattr(model, "is_loaded_in_4bit", False)
-    if args.max_memory_per_gpu is not None:
-        # The model is already sharded across multiple GPUs
-        ds_loader = accelerator.prepare(ds_loader)
-    elif not is_loaded_in_8bit and not is_loaded_in_4bit:
-        # we only wrap data loader to avoid extra memory occupation
-        model = model.to(accelerator.device)
-        ds_loader = accelerator.prepare(ds_loader)
-    else:
-        # model.to() is not supported for 8bit and 4bit models
-        model, ds_loader = accelerator.prepare(model, ds_loader)
-
     generations = complete_code(
         task,
-        accelerator,
         model,
         tokenizer,
         ds_loader,
