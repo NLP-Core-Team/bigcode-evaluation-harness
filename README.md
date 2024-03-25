@@ -65,12 +65,6 @@ Also make sure you have `git-lfs` installed and are logged in the Hub
 huggingface-cli login
 ````
 
-We use [`accelerate`](https://huggingface.co/docs/accelerate/index) to generate code/text in parallel when multiple GPUs are present (multi-GPU mode). You can configure it using:
-
-```bash
-accelerate config
-```
-
 This evaluation harness can also be used in an evaluation only mode, you can use a Multi-CPU setting. For large models, we recommend specifying the precision of the model using the `--precision` flag instead of accelerate config to have only one copy of the model in memory. You can also load models in 8bit with the flag `--load_in_8bit` or 4bit with `--load_in_4bit` if you have `bitsandbytes` installed with the required transformers and accelerate versions.
 
 The evaluation part (solutions execution) for [MultiPL-E](https://github.com/nuprl/MultiPL-E) requires extra dependencies for some programming languages, we provide a Dockerfile with all dependencies, see section [Docker](#docker-containers) for more details.
@@ -84,7 +78,7 @@ For more details on how to evaluate on the tasks, please refer to the documentat
 Below is an example to generate and evaluate on a task.
 
 ```bash
-accelerate launch  main.py \
+python main.py \
   --model <MODEL_NAME> \
   --tasks <TASK_NAME> \
   --limit <NUMBER_PROBLEMS> \
@@ -120,7 +114,7 @@ If you already have the generations in a json file from this evaluation harness 
 Below is an example, be mind of specifying arguments proper to the task you are evaluating on, and note that `model` value here only serves for documenting the experiment. Also add `--n_samples` to specify the number of samples to evaluate per problem (usually the same value used in generation).
 
 ```bash
-accelerate launch  main.py   --tasks mbpp  --allow_code_execution  --load_generations_path generations.json  --model incoder-temperature-08
+python  main.py   --tasks mbpp  --allow_code_execution  --load_generations_path generations.json  --model incoder-temperature-08
 ```
 
 ## Docker containers
@@ -157,7 +151,7 @@ This creates an image called `evaluation-harness-multiple`.
 ### Evaluating inside a container
 Suppose you generated text with the `bigcode/santacoder` model and saved it in `generations_py.json` with:
 ```bash
-accelerate launch  main.py \
+python main.py \
     --model bigcode/santacoder  \
     --tasks multiple-py  \
     --max_length_generation 650 \
