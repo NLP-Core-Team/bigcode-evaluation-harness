@@ -19,9 +19,7 @@ class HumanEvalRu(Task):
     def __init__(self, prompt=""):
         self.counter = 0
         self.prompt = prompt
-        if self.prompt == "instruct_mistral":
-            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>"]
-        elif self.prompt == "instruct_deepseek":
+        if self.prompt in ['instruct','instruct_mistral','instruct_deepseek']:
             stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>","<|EOT|>"]
         else:
             stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"]
@@ -42,9 +40,9 @@ class HumanEvalRu(Task):
             prompt = f"```python\n{doc['prompt'].strip()}"
         elif self.prompt == "github":
             prompt = f"<|code|>\n{doc['prompt'].strip()}"
+        elif self.prompt == "instruct":
+            prompt = f"Пожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n```"
         elif self.prompt == "instruct_mistral":
-            prompt = f"[INST] Пожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
-        elif self.prompt == "instruct_deepseek":
             prompt = f"[INST] Пожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
         elif self.prompt == "instruct_deepseek":
             prompt = f"<｜begin▁of▁sentence｜>You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer\n### Instruction:\nПожалуйста, допиши код функции до конца. Нельзя вносить изменения в код, можно только дописывать. Пожалуйста, верни всю завершенную функцию в блоке кода. Вот код, который нужно закончить:\n```python\n{doc['prompt'].strip()}\n```### Response:\n"
@@ -82,7 +80,7 @@ class HumanEvalRu(Task):
             (not used for Humaneval-Task)
         """
         prompt = self.get_dataset()[idx]["prompt"].strip()
-        if self.prompt == 'instruct_mistral':
+        if self.prompt in ['instruct','instruct_mistral','instruct_deepseek']:
             return extract_generation_code(task_id=idx, output=generation, prompt=prompt,lang_code='python')
         else:
             return prompt + self._stop_at_stop_token(generation, self.stop_words)

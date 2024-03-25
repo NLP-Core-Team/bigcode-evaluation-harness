@@ -54,6 +54,7 @@ def parallel_generations(task, dataset, model, tokenizer, n_tasks, args):
         "top_p": args.top_p,
         "top_k": args.top_k,
         "max_length": args.max_length_generation,
+        # "max_new_tokens": args.max_length_generation,
         "repetition_penalty": args.repetition_penalty,
     }
 
@@ -104,6 +105,7 @@ def parallel_generations(task, dataset, model, tokenizer, n_tasks, args):
         prefix=args.prefix,
         has_encoder=args.modeltype == "seq2seq",
         instruction_tokens=instruction_tokens,
+        apply_chat=args.apply_chat,
     )
     # do not confuse args.batch_size, which is actually the num_return_sequences
     ds_loader = DataLoader(ds_tokenized, batch_size=1)

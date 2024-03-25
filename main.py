@@ -194,6 +194,11 @@ def parse_args():
     )
     parser.add_argument('-d', '--devices', type=str, default='0')
     parser.add_argument('--instance_per_device', type=int, default='1')
+    parser.add_argument(
+        "--apply_chat",
+        action="store_true",
+        help="Whether to use chat template in tokenizer",
+    )
     return parser.parse_args()
 
 

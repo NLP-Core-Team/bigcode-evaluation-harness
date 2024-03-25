@@ -1,8 +1,8 @@
 import re
 import math
 import warnings
-from collections import defaultdict
-
+from collections import defaultdict, namedtuple
+from torch.nn.utils.rnn import pad_sequence
 import torch
 from torch.utils.data import IterableDataset
 from tqdm import tqdm
@@ -10,6 +10,23 @@ from pprint import pprint
 
 INFILL_MODE = False
 INSTRUCTION_MODE = False
+
+
+def pad_outputs(outputs, tokenizer):
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    fields = tuple(outputs[0].keys())
+    pad_tokens = [0]*len(fields)
+    pad_tokens[0] = tokenizer.pad_token_id
+    for i in outputs:
+        for field in fields:
+            i[field] = i[field].view(-1)#.flip(dims=[-1])
+    values = list(map(list, zip(*[item.values() for item in outputs])))
+    outputs = {k:v for k,v in zip(list(outputs[0].keys()), values)}
+    for field, pad_token in zip(fields, pad_tokens):
+        outputs[field] = pad_sequence(outputs[field], batch_first=True, padding_value=pad_token)#.flip(dims=[1])
+    outputs = namedtuple('output', outputs.keys())(*outputs.values())
+    return outputs
 
 
 class TokenizedDataset(IterableDataset):
@@ -33,6 +50,7 @@ class TokenizedDataset(IterableDataset):
         prefix="",
         has_encoder=False,
         instruction_tokens=None,
+        apply_chat=False,
     ):
         self.task = task
         self.dataset = dataset
@@ -45,6 +63,7 @@ class TokenizedDataset(IterableDataset):
         self.prefix = prefix
         self.has_encoder = has_encoder
         self.instruction_tokens = instruction_tokens
+        self.apply_chat = apply_chat
 
     def __iter__(self):
         prompts = []
@@ -94,16 +113,33 @@ class TokenizedDataset(IterableDataset):
             return_token_type_ids = False
         else:
             return_token_type_ids = None  # default
+        if self.apply_chat:
+            outputs = list()
+            for prompt in prompts:
+                messages = [{"role": "user", "content": prompt}]
+                outputs.append(
+                    self.tokenizer.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True, 
+                        return_tensors="pt",
+                        truncation=True,
+                        add_special_tokens=False,
+                        return_token_type_ids=return_token_type_ids,
+                        return_dict=True,
+                    )
+                )
+            outputs = pad_outputs(outputs, self.tokenizer)
 
-        outputs = self.tokenizer(
-            prompts,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-            add_special_tokens=False,
-            max_length=self.max_length,
-            return_token_type_ids=return_token_type_ids,
-        )
+        else:
+            outputs = self.tokenizer(
+                prompts,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+                add_special_tokens=False,
+                max_length=self.max_length,
+                return_token_type_ids=return_token_type_ids,
+            )
         if self.has_encoder:
             outputs_encoder = self.tokenizer(
                 prompts_encoder,

@@ -37,9 +37,7 @@ class HumanEval(Task):
 
     def __init__(self, prompt=""):
         self.prompt = prompt
-        if self.prompt == "instruct_mistral":
-            stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>"]
-        elif self.prompt == "instruct_deepseek":
+        if self.prompt in ['instruct','instruct_mistral','instruct_deepseek']:
             stop_words=["<|endoftext|>", "<extra_id_0>","</s>","<|/code|>","<|EOT|>"]
         else:
             stop_words=["\nclass", "\ndef", "\n#", "\n@", "\nprint", "\nif", "\n```", "<|endoftext|>", "<extra_id_0>", "<|/code|>"]
@@ -61,6 +59,8 @@ class HumanEval(Task):
             prompt = f"```python\n{doc['prompt'].strip()}"
         elif self.prompt == "github":
             prompt = f"<|code|>\n{doc['prompt'].strip()}"
+        elif self.prompt == "instruct":
+            prompt = f"Please continue to complete the function. You are not allowed to modify the given code and do the completion only. Please return all completed function in a codeblock. Here is the given code to do completion:\n```python\n{doc['prompt'].strip()}\n```"         
         elif self.prompt == "instruct_mistral":
             prompt = f"[INST] Please continue to complete the function. You are not allowed to modify the given code and do the completion only. Please return all completed function in a codeblock. Here is the given code to do completion:\n```python\n{doc['prompt'].strip()}\n``` [/INST]"
         elif self.prompt == "instruct_deepseek":
@@ -99,7 +99,7 @@ class HumanEval(Task):
             (not used for Humaneval-Task)
         """
         prompt = self.get_dataset()[idx]["prompt"].strip()
-        if self.prompt == 'instruct_mistral':
+        if self.prompt in ['instruct','instruct_mistral','instruct_deepseek']:
             return extract_generation_code(task_id=idx, output=generation, prompt=prompt,lang_code='python')
         else:
             return prompt + self._stop_at_stop_token(generation, self.stop_words)
